@@ -1,14 +1,17 @@
-from typing import List
-from rank_bm25 import BM25Okapi
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+
 
 class BM25Retriever:
-    def __init__(self, corpus: List[str]):
-        tokenized_corpus = [doc.split(" ") for doc in corpus]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        self.corpus = corpus
+    def __init__(self, documents):
+        # BM25 is based on the term frequency - inverse document frequency (TF-IDF) model
+        self.documents = documents
+        self.vectorizer = TfidfVectorizer()
+        self.X = self.vectorizer.fit_transform(documents)
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[str]:
-        tokenized_query = query.split(" ")
-        scores = self.bm25.get_scores(tokenized_query)
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-        return [self.corpus[i] for i in top_indices]
+    def retrieve(self, query, top_k=5):
+        # Transform query into vector space (TF-IDF)
+        query_vector = self.vectorizer.transform([query])
+        similarities = np.dot(self.X, query_vector.T).toarray().flatten()
+        ranked_indexes = similarities.argsort()[-top_k:][::-1]
+        return [self.documents[i] for i in ranked_indexes]

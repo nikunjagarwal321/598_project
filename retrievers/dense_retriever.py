@@ -1,18 +1,39 @@
-from typing import List
-import faiss
+from transformers import DPRQuestionEncoder, DPRContextEncoder, DPRQuestionEncoderTokenizer, DPRContextEncoderTokenizer
 import numpy as np
-from sentence_transformers import SentenceTransformer
+import torch
 
-class DenseRetriever:
-    def __init__(self, corpus: List[str], model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model_name)
-        self.corpus = corpus
-        self.embeddings = self.model.encode(corpus, convert_to_numpy=True)
-        dim = self.embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(dim)
-        self.index.add(self.embeddings)
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[str]:
-        query_emb = self.model.encode([query], convert_to_numpy=True)
-        distances, indices = self.index.search(query_emb, top_k)
-        return [self.corpus[i] for i in indices[0]]
+class DPRRetriever:
+    def __init__(self, documents):
+        # Load pre-trained DPR model for query and passage encoding
+        self.query_encoder = DPRQuestionEncoder.from_pretrained('facebook/dpr-question_encoder-single-nq-base')
+        self.context_encoder = DPRContextEncoder.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base')
+        self.query_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained(
+            'facebook/dpr-question_encoder-single-nq-base')
+        self.context_tokenizer = DPRContextEncoderTokenizer.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base')
+
+        self.documents = documents
+        self.document_embeddings = self.encode_documents(documents)
+
+    def encode_documents(self, documents):
+        embeddings = []
+        for doc in documents:
+            # Tokenize the document and pass through the encoder
+            inputs = self.context_tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
+            with torch.no_grad():
+                embedding = self.context_encoder(**inputs).pooler_output
+
+            embedding = embedding.squeeze(0).numpy()  # squeeze to remove batch dimension
+            embeddings.append(embedding)
+        return np.array(embeddings)
+
+    def retrieve(self, query, top_k=5):
+        # Encode the query
+        inputs = self.query_tokenizer(query, return_tensors='pt', truncation=True, padding=True)
+        with torch.no_grad():
+            query_embedding = self.query_encoder(**inputs).pooler_output
+
+        similarities = np.dot(self.document_embeddings, query_embedding.numpy().T)
+        ranked_indexes = similarities.argsort(axis=0)[-top_k:][::-1]
+        ranked_indexes = ranked_indexes.flatten()
+        return [self.documents[i] for i in ranked_indexes]
