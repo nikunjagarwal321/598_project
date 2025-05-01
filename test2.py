@@ -156,22 +156,39 @@ def load_triviaqa(
     """
     print(f"Loading TriviaQA from {dataset_path}")
     
+    # Verify dataset exists
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"TriviaQA dataset not found at {dataset_path}. Please check the path.")
+    
     root = Path(dataset_path).parent
+    print(f"Looking for evidence files in: {root}")
+    
     with open(dataset_path, "r", encoding="utf-8") as f:
-        data = json.load(f)["Data"]
+        data_json = json.load(f)
+        if "Data" not in data_json:
+            raise ValueError(f"Invalid TriviaQA format: 'Data' key not found in {dataset_path}")
+        data = data_json["Data"]
+        print(f"Loaded {len(data)} QA pairs from dataset")
 
     docs = {}
     qa_pairs = []
+    missing_files = 0
+    empty_docs = 0
     
     def read_evidence(file_path: Path) -> str:
+        nonlocal missing_files
         if not file_path.exists():
+            missing_files += 1
+            if missing_files <= 5:  # Limit the number of warnings
+                print(f"Warning: Evidence file not found: {file_path}")
             return ""
         try:
             if file_path.suffix == ".gz":
                 with gzip.open(file_path, "rt", encoding="utf-8", errors="ignore") as g:
                     return g.read()
             return file_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        except Exception as e:
+            print(f"Error reading file {file_path}: {str(e)}")
             return ""
 
     def add_doc(doc_info, prefix: str, j: int):
@@ -180,9 +197,26 @@ def load_triviaqa(
         doc_id = f"{prefix}_{j}"
         txt = ""
         if doc_info.get("Filename"):
-            txt = read_evidence(root / doc_info["Filename"])
+            # Try to find the file in the dataset directory
+            file_path = root / doc_info["Filename"]
+            txt = read_evidence(file_path)
+            
+            # If file wasn't found in the expected location, try with just the filename
+            if not txt and '/' in doc_info["Filename"]:
+                base_filename = os.path.basename(doc_info["Filename"])
+                alt_path = root / base_filename
+                txt = read_evidence(alt_path)
+                
         # Fallbacks
-        txt = txt or doc_info.get("Snippet", "") or doc_info.get("Title", "") or doc_info.get("Url", "")
+        if not txt:
+            txt = doc_info.get("Snippet", "") or doc_info.get("Title", "") or doc_info.get("Url", "")
+        
+        nonlocal empty_docs
+        if len(txt.strip().split()) < 10:  # Document has fewer than 10 words
+            empty_docs += 1
+            if empty_docs <= 5:  # Limit the number of warnings
+                print(f"Warning: Document {doc_id} is very short: '{txt}'")
+        
         docs[doc_id] = txt
 
     for i, item in enumerate(data):
@@ -191,8 +225,19 @@ def load_triviaqa(
 
         # QA
         question = item["Question"]
-        aliases = item["Answer"].get("NormalizedAliases") or []
-        gold = aliases[0] if aliases else item["Answer"]["NormalizedValue"]
+        answers = []
+        if "Answer" in item:
+            aliases = item["Answer"].get("NormalizedAliases", [])
+            if aliases:
+                answers = aliases
+            else:
+                answers = [item["Answer"].get("NormalizedValue", "")]
+        
+        if not answers:
+            print(f"Warning: No answer found for question: {question}")
+            continue
+            
+        gold = answers[0]
         
         # Add question complexity estimation (word count as proxy)
         complexity = len(question.split())
@@ -211,8 +256,38 @@ def load_triviaqa(
             add_doc(d, "web", j)
 
     # Drop empty documents
-    docs = {k: v for k, v in docs.items() if v.strip()}
+    orig_doc_count = len(docs)
+    docs = {k: v for k, v in docs.items() if len(v.strip()) > 20}  # Require at least 20 chars
+    print(f"Dropped {orig_doc_count - len(docs)} documents with less than 20 chars")
+    
+    if missing_files > 5:
+        print(f"Warning: {missing_files} evidence files were not found")
+    if empty_docs > 5:
+        print(f"Warning: {empty_docs} documents were very short (< 10 words)")
+    
+    # Sanity check on loaded documents
+    if not docs:
+        raise ValueError("No valid documents were loaded. Please check the dataset path and format.")
+    
+    avg_doc_len = sum(len(doc.split()) for doc in docs.values()) / len(docs)
     print(f"Loaded {len(docs)} non-empty documents and {len(qa_pairs)} QA pairs")
+    print(f"Average document length: {avg_doc_len:.1f} words")
+    
+    # Verify that answers can be found in at least some documents
+    answer_found = 0
+    doc_values = list(docs.values())
+    sample_size = min(len(qa_pairs), 100)  # Check up to 100 QA pairs
+    for i in range(sample_size):
+        answer = qa_pairs[i]["answer"].lower()
+        if any(answer in doc.lower() for doc in doc_values):
+            answer_found += 1
+    
+    answer_found_pct = (answer_found / sample_size) * 100 if sample_size > 0 else 0
+    print(f"Answers found in documents: {answer_found}/{sample_size} ({answer_found_pct:.1f}%)")
+    
+    if answer_found_pct < 5:
+        print("WARNING: Less than 5% of answers found in documents. Results may be poor.")
+        
     return docs, qa_pairs
 
 def benchmark_retrieval(retriever, query: str, gold_answer: str, model, top_k: int) -> Dict[str, Any]:
@@ -278,9 +353,9 @@ def run_all_strategies(docs: Dict[str, str], qa_pairs: List[Dict], top_k: int = 
     
     retrievers = {
         "bm25": BM25Retriever,
-        "dpr": DPRRetriever,
-        "colbert": ColBERTRetriever,
-        "hybrid": HybridRetriever
+        # "dpr": DPRRetriever,
+        # "colbert": ColBERTRetriever,
+        # "hybrid": HybridRetriever
     }
     
     # Initialize embedding model for semantic similarity calculations
@@ -609,35 +684,44 @@ def generate_comparison_plots(results_df: pd.DataFrame, chunking_df: pd.DataFram
     metrics_to_plot = ['em_score', 'mrr', 'f1_score', 'hit_rate_1', 'hit_rate_3', 'semantic_similarity']
     profile_data = results_df.copy()
     
-    for metric in metrics_to_plot:
-        max_val = profile_data[metric].max()
-        if max_val > 0:
-            profile_data[f"{metric}_norm"] = profile_data[metric] / max_val
+    # Check if we have any non-zero metrics
+    has_valid_data = any(profile_data[metric].max() > 0 for metric in metrics_to_plot)
     
-    # Melt the dataframe for plotting
-    profile_melted = profile_data.melt(
-        id_vars=["chunker", "retriever"], 
-        value_vars=[f"{m}_norm" for m in metrics_to_plot],
-        var_name="metric", value_name="normalized_value"
-    )
-    
-    # Clean up metric names for display
-    profile_melted["metric"] = profile_melted["metric"].str.replace("_norm", "")
-    
-    plt.figure(figsize=(14, 8))
-    g = sns.catplot(
-        data=profile_melted,
-        kind="bar",
-        x="metric", y="normalized_value",
-        hue="retriever", col="chunker",
-        height=6, aspect=0.8,
-        col_wrap=3,
-        sharey=True
-    )
-    g.set_titles("{col_name}")
-    plt.suptitle("Performance Profile Across Metrics (Normalized)", y=1.02)
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/performance_profile.png", dpi=300)
+    if has_valid_data:
+        for metric in metrics_to_plot:
+            max_val = profile_data[metric].max()
+            if max_val > 0:
+                profile_data[f"{metric}_norm"] = profile_data[metric] / max_val
+            else:
+                # Create column with zeros to avoid KeyError
+                profile_data[f"{metric}_norm"] = 0
+        
+        # Melt the dataframe for plotting
+        profile_melted = profile_data.melt(
+            id_vars=["chunker", "retriever"], 
+            value_vars=[f"{m}_norm" for m in metrics_to_plot],
+            var_name="metric", value_name="normalized_value"
+        )
+        
+        # Clean up metric names for display
+        profile_melted["metric"] = profile_melted["metric"].str.replace("_norm", "")
+        
+        plt.figure(figsize=(14, 8))
+        g = sns.catplot(
+            data=profile_melted,
+            kind="bar",
+            x="metric", y="normalized_value",
+            hue="retriever", col="chunker",
+            height=6, aspect=0.8,
+            col_wrap=3,
+            sharey=True
+        )
+        g.set_titles("{col_name}")
+        plt.suptitle("Performance Profile Across Metrics (Normalized)", y=1.02)
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/performance_profile.png", dpi=300)
+    else:
+        print("Skipping performance profile plot - all metrics are zero")
     
     # Save results to CSV
     results_df.to_csv(f"{output_dir}/benchmark_results.csv", index=False)
@@ -662,9 +746,9 @@ def triviaqa_benchmark(dataset_path, max_docs=300, max_qa=100, top_k=5):
 
 def main():
     # Parameters
-    TRIVIAQA_PATH = "../triviaqa-unfiltered/unfiltered-web-dev.json"
-    MAX_DOCS = 100  # Reduced for faster evaluation
-    MAX_QA = 50     # Reduced for faster evaluation
+    TRIVIAQA_PATH = "../triviaqa-rc/qa/verified-web-dev.json"
+    MAX_DOCS = 100000  # Reduced for faster evaluation
+    MAX_QA = 50000   # Reduced for faster evaluation
     TOP_K = 5
     
     # Run the benchmark
