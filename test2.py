@@ -14,7 +14,7 @@ import resource
 import re
 import psutil
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Union
 from collections import defaultdict
 import numpy as np
 from tqdm import tqdm
@@ -46,22 +46,35 @@ except LookupError:
     nltk.download('punkt', quiet=True)
 
 # Advanced evaluation utilities
-def exact_match(gold: str, passages: List[str]) -> int:
+def exact_match(gold: Union[str, List[str]], passages: List[str]) -> int:
     """Check if the gold answer appears in any retrieved passage."""
-    g = gold.lower()
-    return int(any(g in p.lower() for p in passages))
+    # Handle case where gold is a list
+    if isinstance(gold, list):
+        # Check if any of the gold answers appears in any passage
+        return int(any(any(g.lower() in p.lower() for g in gold) for p in passages))
+    else:
+        # Original behavior when gold is a string
+        g = gold.lower()
+        return int(any(g in p.lower() for p in passages))
 
-def calculate_precision(gold: str, passages: List[str]) -> float:
+def calculate_precision(gold: Union[str, List[str]], passages: List[str]) -> float:
     """Calculate precision of retrieved passages."""
-    g = gold.lower()
-    correct = sum(1 for p in passages if g in p.lower())
+    if isinstance(gold, list):
+        # Check how many passages contain any of the gold answers
+        correct = sum(1 for p in passages if any(g.lower() in p.lower() for g in gold))
+    else:
+        g = gold.lower()
+        correct = sum(1 for p in passages if g in p.lower())
     return correct / len(passages) if passages else 0
 
-def calculate_recall(gold: str, passages: List[str], top_k: int) -> float:
+def calculate_recall(gold: Union[str, List[str]], passages: List[str], top_k: int) -> float:
     """Calculate recall for retrieved passages."""
     # Simplified recall for this scenario
-    g = gold.lower()
-    return 1.0 if any(g in p.lower() for p in passages) else 0.0
+    if isinstance(gold, list):
+        return 1.0 if any(any(g.lower() in p.lower() for g in gold) for p in passages) else 0.0
+    else:
+        g = gold.lower()
+        return 1.0 if any(g in p.lower() for p in passages) else 0.0
 
 def calculate_f1(precision: float, recall: float) -> float:
     """Calculate F1 score from precision and recall."""
@@ -69,28 +82,45 @@ def calculate_f1(precision: float, recall: float) -> float:
         return 0.0
     return 2 * (precision * recall) / (precision + recall)
 
-def reciprocal_rank(gold: str, passages: List[str]) -> float:
+def reciprocal_rank(gold: Union[str, List[str]], passages: List[str]) -> float:
     """Calculate Mean Reciprocal Rank (where first correct answer appears)."""
-    g = gold.lower()
-    for i, passage in enumerate(passages):
-        if g in passage.lower():
-            return 1.0 / (i + 1)
+    if isinstance(gold, list):
+        for i, passage in enumerate(passages):
+            p_lower = passage.lower()
+            if any(g.lower() in p_lower for g in gold):
+                return 1.0 / (i + 1)
+    else:
+        g = gold.lower()
+        for i, passage in enumerate(passages):
+            if g in passage.lower():
+                return 1.0 / (i + 1)
     return 0.0
 
-def hit_rate_at_k(gold: str, passages: List[str], k: int) -> int:
+def hit_rate_at_k(gold: Union[str, List[str]], passages: List[str], k: int) -> int:
     """Check if the answer is found within top k results."""
     if k > len(passages):
         k = len(passages)
-    g = gold.lower()
-    return int(any(g in p.lower() for p in passages[:k]))
+    
+    if isinstance(gold, list):
+        return int(any(any(g.lower() in p.lower() for g in gold) for p in passages[:k]))
+    else:
+        g = gold.lower()
+        return int(any(g in p.lower() for p in passages[:k]))
 
-def semantic_similarity(gold: str, passages: List[str], model) -> float:
+def semantic_similarity(gold: Union[str, List[str]], passages: List[str], model) -> float:
     """Calculate semantic similarity between gold answer and passages."""
     if not passages:
         return 0.0
         
+    # Handle list of gold answers
+    if isinstance(gold, list):
+        # Use the first answer for encoding if it's a list
+        gold_text = gold[0] if gold else ""
+    else:
+        gold_text = gold
+        
     # Encode gold answer and passages
-    gold_embedding = model.encode([gold], convert_to_numpy=True)
+    gold_embedding = model.encode([gold_text], convert_to_numpy=True)
     passage_embeddings = model.encode(passages, convert_to_numpy=True)
     
     # Calculate similarities
@@ -126,6 +156,7 @@ def analyze_chunks(chunks: List[str]) -> Dict[str, float]:
 def measure_memory_usage():
     """Measure current memory usage in MB."""
     process = psutil.Process(os.getpid())
+    # Return memory in MB with higher precision
     return process.memory_info().rss / (1024 * 1024)  # Convert to MB
 
 class Timer:
@@ -147,72 +178,101 @@ def load_triviaqa(
     Load TriviaQA dataset and return documents and QA pairs.
     
     Args:
-        dataset_path: Path to the TriviaQA JSON file
+        dataset_path: Path to the TriviaQA JSON file (e.g., 'unfiltered-dev.json')
         max_docs: Maximum number of documents to load
         max_qa_pairs: Maximum number of QA pairs to load
         
     Returns:
         Tuple of (documents dictionary, list of QA pairs)
     """
-    print(f"Loading TriviaQA from {dataset_path}")
+    print(f"Loading TriviaQA dataset from: {dataset_path}")
     
-    root = Path(dataset_path).parent
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        data = json.load(f)["Data"]
-
+    # Load the TriviaQA dataset
+    with open(dataset_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)['Data']
+    
+    # Extract documents and QA pairs
     docs = {}
     qa_pairs = []
+    doc_count = 0
     
-    def read_evidence(file_path: Path) -> str:
-        if not file_path.exists():
-            return ""
-        try:
-            if file_path.suffix == ".gz":
-                with gzip.open(file_path, "rt", encoding="utf-8", errors="ignore") as g:
-                    return g.read()
-            return file_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            return ""
-
-    def add_doc(doc_info, prefix: str, j: int):
-        if len(docs) >= max_docs:
-            return
-        doc_id = f"{prefix}_{j}"
-        txt = ""
-        if doc_info.get("Filename"):
-            txt = read_evidence(root / doc_info["Filename"])
-        # Fallbacks
-        txt = txt or doc_info.get("Snippet", "") or doc_info.get("Title", "") or doc_info.get("Url", "")
-        docs[doc_id] = txt
-
     for i, item in enumerate(data):
-        if i >= max_qa_pairs:
+        if doc_count >= max_docs:  # Change condition to count actual loaded documents
             break
-
-        # QA
-        question = item["Question"]
-        aliases = item["Answer"].get("NormalizedAliases") or []
-        gold = aliases[0] if aliases else item["Answer"]["NormalizedValue"]
+            
+        question = item['Question']
+        answers = item['Answer']['NormalizedAliases']
         
-        # Add question complexity estimation (word count as proxy)
-        complexity = len(question.split())
+        # Use the first answer as the gold answer
+        gold_answer = answers if answers else list(item['Answer']['NormalizedValue'])
         
         qa_pairs.append({
-            "question": question, 
-            "answer": gold,
-            "complexity": complexity
+            "question": question,
+            "answer": gold_answer
         })
+        
+        # Extract documents from Wikipedia sources
+        added_doc = False
+        if 'EntityPages' in item:
+            for j, doc_info in enumerate(item['EntityPages']):
+                    
+                doc_id = f"wiki_{doc_info['Title']}_{j}"
+                
+                # Check if file exists
+                if 'Filename' in doc_info:
+                    doc_path = os.path.join(os.path.dirname("data/wikipedia"), doc_info['Filename'])
+                    if os.path.exists(doc_path):
+                        try:
+                            with open(doc_path, 'r', encoding='utf-8') as doc_file:
+                                doc_content = doc_file.read()
+                                docs[doc_id] = doc_content
+                                added_doc = True
+                                doc_count += 1
 
-        # Wiki evidence
-        for j, d in enumerate(item.get("EntityPages", [])):
-            add_doc(d, f"wiki_{d.get('Title','wiki')}", j)
-        # Web search evidence
-        for j, d in enumerate(item.get("SearchResults", [])):
-            add_doc(d, "web", j)
-
-    # Drop empty documents
-    docs = {k: v for k, v in docs.items() if v.strip()}
-    print(f"Loaded {len(docs)} non-empty documents and {len(qa_pairs)} QA pairs")
+                        except:
+                            # If file can't be read, use the snippet
+                            docs[doc_id] = doc_info.get('Snippet', '')
+                            added_doc = True
+                            doc_count += 1
+                    else:
+                        # If file doesn't exist, use the snippet
+                        docs[doc_id] = doc_info.get('Snippet', '')
+                        added_doc = True
+                        doc_count += 1
+                else:
+                    # If no filename, use the snippet
+                    docs[doc_id] = doc_info.get('Snippet', '')
+                    added_doc = True
+                    doc_count += 1
+                    
+        # Add web documents if available
+        if 'SearchResults' in item and not added_doc:
+            for j, doc_info in enumerate(item['SearchResults']):
+                    
+                doc_id = f"web_{j}_{doc_info.get('Title', '')}"
+                
+                if 'Filename' in doc_info:
+                    doc_path = os.path.join("data/web", doc_info['Filename'])
+                    if os.path.exists(doc_path):
+                        try:
+                            with open(doc_path, 'r', encoding='utf-8') as doc_file:
+                                doc_content = doc_file.read()
+                                docs[doc_id] = doc_content
+                                doc_count += 1
+                        except:
+                            docs[doc_id] = doc_info.get('Snippet', '')
+                            doc_count += 1
+                    else:
+                        docs[doc_id] = doc_info.get('Snippet', '')
+                        doc_count += 1
+                else:
+                    docs[doc_id] = doc_info.get('Snippet', '')
+                    doc_count += 1
+    
+    # Limit qa_pairs to max_qa_pairs
+    qa_pairs = qa_pairs[:max_qa_pairs]
+    
+    print(f"Loaded {len(docs)} documents and {len(qa_pairs)} QA pairs from TriviaQA")
     return docs, qa_pairs
 
 def benchmark_retrieval(retriever, query: str, gold_answer: str, model, top_k: int) -> Dict[str, Any]:
@@ -220,15 +280,18 @@ def benchmark_retrieval(retriever, query: str, gold_answer: str, model, top_k: i
     # Measure memory before retrieval
     mem_before = measure_memory_usage()
     
-    # Measure retrieval time
-    start = time.time()
+    # Measure retrieval time with higher precision
+    start = time.perf_counter()  # Use perf_counter for higher precision
     results = retriever.retrieve(query, top_k=top_k)
-    end = time.time()
+    end = time.perf_counter()  # Use perf_counter for higher precision
     latency = end - start
+    
+    # Ensure latency is never reported as exactly zero
+    latency = max(latency, 0.000001)  # Set minimum measurable time
     
     # Measure memory after retrieval
     mem_after = measure_memory_usage()
-    mem_usage = mem_after - mem_before
+    mem_usage = max(0.0, mem_after - mem_before)  # Ensure memory usage is never negative
     
     # Calculate basic metrics
     em = exact_match(gold_answer, results)
@@ -294,20 +357,20 @@ def run_all_strategies(docs: Dict[str, str], qa_pairs: List[Dict], top_k: int = 
     total_combinations = len(chunkers) * len(retrievers)
     combination_count = 0
     
-    # Sample a smaller set of QA pairs for evaluation to keep runtime manageable
-    eval_qa_pairs = qa_pairs[:20]  # Adjust based on runtime constraints
+    # Sample a larger set of QA pairs for evaluation 
+    eval_qa_pairs = qa_pairs[:min(30, len(qa_pairs))]  # Use more QA pairs for better differentiation
     
     for chunker_name, chunker in chunkers.items():
         # Create chunks for this chunker
         print(f"\nProcessing chunker: {chunker_name}")
         chunks = []
-        chunk_time_start = time.time()
+        chunk_time_start = time.perf_counter()  # Use perf_counter for higher precision
         
         for doc in tqdm(doc_values, desc="Chunking documents"):
             doc_chunks = chunker.chunk(doc)
             chunks.extend(doc_chunks)
             
-        chunk_time = time.time() - chunk_time_start
+        chunk_time = time.perf_counter() - chunk_time_start  # Use perf_counter for higher precision
         
         # Analyze chunk quality
         chunk_metrics = analyze_chunks(chunks)
@@ -331,10 +394,11 @@ def run_all_strategies(docs: Dict[str, str], qa_pairs: List[Dict], top_k: int = 
             try:
                 # Measure index building time and memory
                 index_mem_before = measure_memory_usage()
-                index_time_start = time.time()
+                index_time_start = time.perf_counter()  # Use perf_counter for higher precision
                 retriever = retriever_class(chunks)
-                index_time = time.time() - index_time_start
-                index_mem_usage = measure_memory_usage() - index_mem_before
+                index_time = time.perf_counter() - index_time_start  # Use perf_counter for higher precision
+                index_mem_after = measure_memory_usage()
+                index_mem_usage = max(0.0, index_mem_after - index_mem_before)  # Ensure non-negative
                 
                 print(f"Index built in {index_time:.2f}s, used {index_mem_usage:.1f}MB memory")
                 
@@ -663,8 +727,11 @@ def triviaqa_benchmark(dataset_path, max_docs=300, max_qa=100, top_k=5):
 def main():
     # Parameters
     TRIVIAQA_PATH = "../triviaqa-unfiltered/unfiltered-web-dev.json"
-    MAX_DOCS = 100  # Reduced for faster evaluation
-    MAX_QA = 50     # Reduced for faster evaluation
+
+    # TRIVIAQA_PATH = "../triviaqa-rc/qa/verified-web-dev.json"
+
+    MAX_DOCS = 200  # Increased for better differentiation
+    MAX_QA = 100    # Increased for better differentiation 
     TOP_K = 5
     
     # Run the benchmark
@@ -706,8 +773,8 @@ def main():
     # Best compromise (product of normalized metrics)
     # Normalize metrics
     max_em = summary['em_score'].max()
-    min_time = summary['avg_query_time'].min() 
-    min_memory = summary['query_memory_mb'].min()
+    min_time = max(summary['avg_query_time'].min(), 0.000001)  # Ensure non-zero
+    min_memory = max(summary['query_memory_mb'].min(), 0.000001)  # Ensure non-zero
     
     # Create balanced score (higher is better)
     summary['balanced_score'] = (
