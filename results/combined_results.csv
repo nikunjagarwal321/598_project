@@ -1,0 +1,17 @@
+experiment,chunker,system,latency,em,precision,recall,mrr
+"fixed_{'chunk_size': 64, 'drop_last': False}",fixed,bm25,0.26848711997445207,0.01,0.002,0.01,0.01
+"fixed_{'chunk_size': 64, 'drop_last': False}",fixed,dpr,19.224405799759552,0.0,0.0,0.0,0.0
+"fixed_{'chunk_size': 128, 'drop_last': False}",fixed,bm25,0.24014289941987954,0.01,0.002,0.01,0.01
+"fixed_{'chunk_size': 128, 'drop_last': False}",fixed,dpr,10.728488680033479,0.0,0.0,0.0,0.0
+"fixed_{'chunk_size': 256, 'drop_last': False}",fixed,bm25,0.24852000940882135,0.01,0.002,0.01,0.01
+"fixed_{'chunk_size': 256, 'drop_last': False}",fixed,dpr,10.557055789831793,0.0,0.0,0.0,0.0
+"overlap_{'chunk_size': 128, 'overlap': 32, 'drop_last': False}",overlap,bm25,0.2417408800101839,0.01,0.002,0.01,0.01
+"overlap_{'chunk_size': 128, 'overlap': 32, 'drop_last': False}",overlap,dpr,10.435722550028004,0.0,0.0,0.0,0.0
+"overlap_{'chunk_size': 256, 'overlap': 64, 'drop_last': False}",overlap,bm25,0.24541418999433517,0.01,0.002,0.01,0.01
+"overlap_{'chunk_size': 256, 'overlap': 64, 'drop_last': False}",overlap,dpr,10.537734560275567,0.0,0.0,0.0,0.0
+semantic_{'chunk_char_limit': 500},semantic,bm25,0.25008790973515715,0.01,0.002,0.01,0.01
+semantic_{'chunk_char_limit': 500},semantic,dpr,10.425385419730446,0.0,0.0,0.0,0.0
+semantic_{'chunk_char_limit': 1000},semantic,bm25,0.24723833026655484,0.01,0.002,0.01,0.01
+semantic_{'chunk_char_limit': 1000},semantic,dpr,10.403432099992642,0.0,0.0,0.0,0.0
+semantic_{'chunk_char_limit': 1500},semantic,bm25,0.2578392004215857,0.01,0.002,0.01,0.01
+semantic_{'chunk_char_limit': 1500},semantic,dpr,10.898194979745313,0.0,0.0,0.0,0.0

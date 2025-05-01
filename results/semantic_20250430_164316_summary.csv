@@ -1,0 +1,3 @@
+bm25,bm25,bm25,bm25,bm25,dpr,dpr,dpr,dpr,dpr,chunker,chunker_params,top_k,seed,num_chunks,chunks_per_doc
+latency,em,precision,recall,mrr,latency,em,precision,recall,mrr,,,,,,
+0.25008790973515715,0.01,0.002,0.01,0.01,10.425385419730446,0.0,0.0,0.0,0.0,semantic,{'chunk_char_limit': 500},5,42,250,1.0
