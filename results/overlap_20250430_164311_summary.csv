@@ -1,3 +1,0 @@
-bm25,bm25,bm25,bm25,bm25,dpr,dpr,dpr,dpr,dpr,chunker,chunker_params,top_k,seed,num_chunks,chunks_per_doc
-latency,em,precision,recall,mrr,latency,em,precision,recall,mrr,,,,,,
-0.2417408800101839,0.01,0.002,0.01,0.01,10.435722550028004,0.0,0.0,0.0,0.0,overlap,"{'chunk_size': 128, 'overlap': 32, 'drop_last': False}",5,42,250,1.0
