@@ -3,7 +3,7 @@
 Useful when generation models need additional left/right context so that
 answers do not straddle chunk boundaries.
 """
-from typing import Callable, List, Sequence
+from typing import Callable, List, Sequence, Union
 
 
 class OverlappingChunker:
@@ -22,8 +22,8 @@ class OverlappingChunker:
         chunk_size: int = 512,
         overlap: int = 128,
         *,
-        tokenizer: Callable[[str], Sequence[str]] | None = None,
-        detokenizer: Callable[[Sequence[str]], str] | None = None,
+            tokenizer: Union[Callable[[str], Sequence[str]], None] = None,
+            detokenizer: Union[Callable[[Sequence[str]], str], None] = None,
         drop_last: bool = False,
     ) -> None:
         if not 0 <= overlap < chunk_size:
