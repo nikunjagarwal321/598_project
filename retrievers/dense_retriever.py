@@ -4,8 +4,9 @@ import torch
 
 
 class DPRRetriever:
-    def __init__(self, documents):
+    def __init__(self, documents, device='cuda'):
         # Load pre-trained DPR model for query and passage encoding
+        self.device = device if torch.cuda.is_available() else 'cpu'
         self.query_encoder = DPRQuestionEncoder.from_pretrained('facebook/dpr-question_encoder-single-nq-base')
         self.context_encoder = DPRContextEncoder.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base')
         self.query_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained(
@@ -17,15 +18,26 @@ class DPRRetriever:
 
     def encode_documents(self, documents):
         embeddings = []
-        for doc in documents:
-            # Tokenize the document and pass through the encoder
-            inputs = self.context_tokenizer(doc, return_tensors='pt', truncation=True, padding=True)
-            with torch.no_grad():
-                embedding = self.context_encoder(**inputs).pooler_output
 
-            embedding = embedding.squeeze(0).numpy()  # squeeze to remove batch dimension
-            embeddings.append(embedding)
-        return np.array(embeddings)
+        # Batching: encode documents in chunks
+        batch_size = 16  # Adjust this based on memory limits
+        for start in range(0, len(documents), batch_size):
+            batch_docs = documents[start:start + batch_size]
+
+            # Tokenize the batch of documents and move tensors to the correct device
+            inputs = self.context_tokenizer(batch_docs, return_tensors='pt', padding=True, truncation=True).to(
+                self.device)
+
+            # Disable gradient calculations and get embeddings
+            with torch.no_grad():
+                outputs = self.context_encoder(**inputs)
+                embeddings_batch = outputs.pooler_output  # (batch_size, hidden_size)
+
+            # Convert embeddings to NumPy array (if needed)
+            embeddings.append(embeddings_batch.cpu().numpy())  # Move to CPU before converting to numpy
+
+        # Combine all batches
+        return np.concatenate(embeddings, axis=0)
 
     def retrieve(self, query, top_k=5):
         # Encode the query
