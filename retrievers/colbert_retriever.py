@@ -37,9 +37,9 @@ class ColBERTRetriever:
         self.cache_path  = Path(cache_path) if cache_path else None
 
         # ─── Load model in FP16 on GPU ──────────────────────────────────────
-        self.model = SentenceTransformer(model_name,
-                                         device=str(self.device),
-                                         dtype=torch.float16)
+        self.model = SentenceTransformer(model_name, device=str(self.device))
+        self.model.to(torch.float16)          # convert weights to FP16 in‑place
+
 
         # ─── Encode or load embeddings ─────────────────────────────────────
         self.documents = list(documents)
