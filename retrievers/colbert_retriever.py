@@ -37,8 +37,7 @@ class ColBERTRetriever:
 
         self.model = SentenceTransformer(model_name, device=str(self.device))
         # convert weights + buffers to half‑precision for speed / memory
-        self.model.to(torch.float16)
-
+        self.model.to(dtype=torch.float16)
         if self.device.type == "cuda":
             gpu_name = torch.cuda.get_device_name(self.device)
             print(f" GPU: {gpu_name} (FP16)")
