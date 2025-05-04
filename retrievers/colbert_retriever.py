@@ -9,14 +9,10 @@ from sentence_transformers import SentenceTransformer, util
 
 
 class ColBERTRetriever:
-    """
-    ColBERT‑style retriever that
-
-    • encodes passages with SentenceTransformers on GPU (FP16)
-    • parallelises tokenisation with `encode_multi_process`
-    • stores embeddings in either
-        - a FAISS GPU index   (fastest retrieval)
-        - a torch / NumPy tensor on GPU (fallback)
+    """ColBERT‑style dense retriever that
+    • Encodes passages on the first CUDA device when available (falls back to CPU).
+    • Casts the model **and** embeddings to FP16 only when a GPU is present.
+    • Optionally builds an in‑VRAM FAISS flat IP index for ultra‑fast top‑k search.
     """
 
     def __init__(
@@ -29,83 +25,89 @@ class ColBERTRetriever:
         use_faiss: bool = True,
         device: str | None = None,
     ) -> None:
+        # ─── Resolve device ---------------------------------------------------------
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.use_fp16 = self.device.type == "cuda"  # cast only when it makes sense
+
+        # ─── Hyper‑parameters -------------------------------------------------------
         self.batch_size = batch_size
-        self.use_faiss = use_faiss
+        self.num_workers = num_workers
         self.dim = 768  # BERT‑base hidden size
+        self.use_faiss = use_faiss and torch.cuda.is_available()
         self.cache_path = Path(cache_path) if cache_path else None
 
+        # ─── Load model -------------------------------------------------------------
         self.model = SentenceTransformer(model_name, device=str(self.device))
-        # convert weights + buffers to half‑precision for speed / memory
-        self.model.to(dtype=torch.float16)
-        if self.device.type == "cuda":
-            gpu_name = torch.cuda.get_device_name(self.device)
-            print(f" GPU: {gpu_name} (FP16)")
-        else:
-            print("Running on CPU — GPU not detected.")
+        if self.use_fp16:
+            self.model.half()  # safer than .to(dtype=..)
 
-        # ─── Build / load embeddings -------------------------------------------------------------------
+        print(
+            f"[ColBERTRetriever] running on {self.device} | fp16={self.use_fp16} | faiss_gpu={self.use_faiss}"
+        )
+
+        # ─── Prepare embeddings -----------------------------------------------------
         self.documents = list(documents)
         if self.cache_path and self.cache_path.exists():
             self.document_embeddings = np.load(self.cache_path, mmap_mode="r")
         else:
-            self.document_embeddings = self._encode_documents(documents, num_workers)
+            self.document_embeddings = self._encode_documents(self.documents)
             if self.cache_path:
                 np.save(self.cache_path, self.document_embeddings)
 
-        # ─── Build FAISS index (optional) ---------------------------------------------------------------
+        # ─── Build FAISS index ------------------------------------------------------
         if self.use_faiss:
             self.index = self._build_faiss_index(self.document_embeddings)
 
-    # --------------------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------------------
     @torch.inference_mode()
-    def _encode_documents(self, docs: Sequence[str], n_proc: int) -> np.ndarray:
-        """FP16 GPU encoding + multi‑process tokenisation."""
-        return util.encode_multi_process(
+    def _encode_documents(self, docs: Sequence[str]) -> np.ndarray:
+        """Encode passages in parallel and return an FP16/FP32 NumPy array."""
+        emb = util.encode_multi_process(
             sentences=docs,
             model=self.model,
             batch_size=self.batch_size,
             chunk_size=5000,
-            num_processes=n_proc,
+            num_processes=self.num_workers,
+            convert_to_numpy=True,
             normalize_embeddings=False,
-            convert_to_numpy=True,  # returns FP16 np array
             show_progress_bar=True,
-        ).astype(np.float16)
+        )
+        return emb.astype(np.float16 if self.use_fp16 else np.float32)
 
-    # --------------------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------------------
     def _build_faiss_index(self, vecs: np.ndarray):
-        """Create a GPU FAISS index (flat inner‑product) for dot‑product search."""
-        vecs32 = vecs.astype(np.float32)  # FAISS expects FP32 vectors
+        """Build a GPU FAISS IndexFlatIP (inner product) if GPU present."""
+        vecs32 = vecs.astype(np.float32)
         cpu_index = faiss.IndexFlatIP(self.dim)
         cpu_index.add(vecs32)
         res = faiss.StandardGpuResources()
-        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        return gpu_index
+        return faiss.index_cpu_to_gpu(res, 0, cpu_index)
 
+    # ------------------------------------------------------------------------------
     @torch.inference_mode()
     def _encode_query(self, query: str) -> np.ndarray:
-        return (
-            self.model.encode(
-                query,
-                batch_size=1,
-                device=self.device,
-                convert_to_numpy=True,
-                normalize_embeddings=False,
-            )
-            .astype(np.float32)
-            .squeeze()
+        vec = self.model.encode(
+            query,
+            batch_size=1,
+            device=self.device,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
         )
+        return vec.astype(np.float32)
+
+    # ------------------------------------------------------------------------------
     @torch.inference_mode()
     def retrieve(self, query: str, top_k: int = 5) -> List[str]:
-        """Return top‑k passages most similar to `query`."""
         q_vec = self._encode_query(query)
 
+        # Fast path: FAISS GPU index -------------------------------------------------
         if self.use_faiss:
             _, idx = self.index.search(q_vec[None, :], top_k)
             return [self.documents[i] for i in idx[0]]
 
-        doc_emb = torch.from_numpy(self.document_embeddings).to(self.device, dtype=torch.float16)
-        q = torch.from_numpy(q_vec).to(self.device, dtype=torch.float16)
-        sims = torch.matmul(doc_emb, q)  # (N,)
-        top = torch.topk(sims, k=top_k).indices.cpu().numpy()
-        return [self.documents[i] for i in top.tolist()]
+        # Fallback: mat‑mul on whichever device the model sits ----------------------
+        doc_emb_t = torch.from_numpy(self.document_embeddings).to(self.device)
+        q_vec_t = torch.from_numpy(q_vec).to(self.device)
+        sims = torch.matmul(doc_emb_t, q_vec_t)
+        top_idx = torch.topk(sims, k=top_k).indices.cpu().numpy()
+        return [self.documents[i] for i in top_idx.tolist()]
